@@ -6,6 +6,7 @@ interface NavbarProps {
   onToggleDemoMode: () => void;
   onOpenTriggerModal: () => void;
   buildsCount: number;
+  apiConnected?: boolean;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -13,6 +14,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onToggleDemoMode,
   onOpenTriggerModal,
   buildsCount,
+  apiConnected = false,
 }) => {
   return (
     <header className="navbar">
@@ -31,8 +33,11 @@ export const Navbar: React.FC<NavbarProps> = ({
 
       <div className="nav-actions">
         <div className="nav-stat-chip">
-          <span className="live-indicator"></span>
-          <span>Jenkins: <strong>Connected</strong></span>
+          <span 
+            className="live-indicator" 
+            style={{ backgroundColor: apiConnected ? '#10b981' : (isDemoMode ? '#818cf8' : '#f59e0b') }}
+          ></span>
+          <span>Backend: <strong>{apiConnected ? 'FastAPI (Port 8000)' : (isDemoMode ? 'Demo Sandbox' : 'Connecting...')}</strong></span>
         </div>
 
         <div className="nav-stat-chip">

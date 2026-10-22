@@ -250,22 +250,35 @@ def _build_initial_pipelines() -> List[Pipeline]:
     ]
 
 
+# ── In-memory state for demo pipelines & triggered builds ───
+
+_demo_pipelines: List[Pipeline] = _build_initial_pipelines()
+_triggered_builds: dict[str, Build] = {}
+
+
+def get_demo_pipelines() -> List[Pipeline]:
+    """Return current list of demo pipelines."""
+    return _demo_pipelines
+
+
+def reset_demo_data() -> None:
+    """Reset demo data to initial state (useful for automated tests)."""
+    global _demo_pipelines, _triggered_builds
+    _demo_pipelines = _build_initial_pipelines()
+    _triggered_builds.clear()
+
+
 def get_demo_metrics() -> PipelineMetrics:
     """Return aggregate demo metrics."""
     return PipelineMetrics(
-        total_pipelines=4,
-        total_builds=128,
-        successful_builds=112,
+        total_pipelines=len(_demo_pipelines),
+        total_builds=128 + len(_triggered_builds),
+        successful_builds=112 + len(_triggered_builds),
         failed_builds=16,
         average_duration_seconds=46,
         active_deployments=3,
         security_health_score=92,
     )
-
-
-# ── In-memory state for triggered builds in demo mode ────
-
-_triggered_builds: dict[str, Build] = {}
 
 
 def trigger_demo_build(pipeline_id: str, branch: str) -> Build:
@@ -320,6 +333,9 @@ def trigger_demo_build(pipeline_id: str, branch: str) -> Build:
     )
 
     _triggered_builds[pipeline_id] = new_build
+    if pipe.last_build:
+        pipe.history.insert(0, pipe.last_build)
+    pipe.last_build = new_build
     return new_build
 
 
@@ -333,6 +349,11 @@ def get_demo_build(pipeline_id: str, build_number: int) -> Build | None:
     # Fall back to default demo data
     pipelines = get_demo_pipelines()
     pipe = next((p for p in pipelines if p.id == pipeline_id), None)
-    if pipe and pipe.last_build and pipe.last_build.build_number == build_number:
-        return pipe.last_build
+    if pipe:
+        if pipe.last_build and pipe.last_build.build_number == build_number:
+            return pipe.last_build
+        for b in pipe.history:
+            if b.build_number == build_number:
+                return b
     return None
+

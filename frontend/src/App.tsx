@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Navbar } from './components/Navbar';
 import { MetricsOverview } from './components/MetricsOverview';
 import { PipelineCard } from './components/PipelineCard';
@@ -9,28 +9,114 @@ import { TriggerBuildModal } from './components/TriggerBuildModal';
 import type { TriggerOptions } from './components/TriggerBuildModal';
 import { INITIAL_PIPELINES, DEMO_METRICS } from './mock/demoData';
 import type { Pipeline, Build, PipelineMetrics, StageStatus } from './types/pipeline';
+import {
+  checkBackendHealth,
+  fetchPipelines,
+  fetchMetrics,
+  triggerPipelineBuild,
+} from './services/api';
 
 export const App: React.FC = () => {
   const [pipelines, setPipelines] = useState<Pipeline[]>(INITIAL_PIPELINES);
   const [metrics, setMetrics] = useState<PipelineMetrics>(DEMO_METRICS);
   const [isDemoMode, setIsDemoMode] = useState<boolean>(true);
+  const [backendOnline, setBackendOnline] = useState<boolean>(false);
+  const [backendNotice, setBackendNotice] = useState<string | null>(null);
 
-  // Active Modals
+  // Active Modal Selection IDs
   const [selectedPipelineForTrigger, setSelectedPipelineForTrigger] = useState<string | null>(null);
   const [isTriggerModalOpen, setIsTriggerModalOpen] = useState<boolean>(false);
-  const [activeLogsModal, setActiveLogsModal] = useState<{ pipeline: Pipeline; build: Build } | null>(null);
-  const [activeSecurityModal, setActiveSecurityModal] = useState<{ pipeline: Pipeline; build: Build } | null>(null);
-  const [activeDockerModal, setActiveDockerModal] = useState<{ pipeline: Pipeline; build: Build } | null>(null);
+  const [activeLogsSelection, setActiveLogsSelection] = useState<{ pipelineId: string; buildNumber: number } | null>(null);
+  const [activeSecuritySelection, setActiveSecuritySelection] = useState<{ pipelineId: string; buildNumber: number } | null>(null);
+  const [activeDockerSelection, setActiveDockerSelection] = useState<{ pipelineId: string; buildNumber: number } | null>(null);
 
-  // Synchronize modal state if active build is updated in background
-  useEffect(() => {
-    if (activeLogsModal) {
-      const updatedPipe = pipelines.find((p) => p.id === activeLogsModal.pipeline.id);
-      if (updatedPipe?.lastBuild) {
-        setActiveLogsModal({ pipeline: updatedPipe, build: updatedPipe.lastBuild });
-      }
+  // Derive active modal data reactively from current pipelines state without cascading setState effects
+  const activeLogsPipeline = activeLogsSelection
+    ? pipelines.find((p) => p.id === activeLogsSelection.pipelineId) || null
+    : null;
+  const activeLogsBuild: Build | null = activeLogsPipeline
+    ? (activeLogsPipeline.lastBuild?.buildNumber === activeLogsSelection?.buildNumber
+        ? (activeLogsPipeline.lastBuild ?? null)
+        : (activeLogsPipeline.history.find((b) => b.buildNumber === activeLogsSelection?.buildNumber) ??
+           activeLogsPipeline.lastBuild ?? null))
+    : null;
+
+  const activeSecurityPipeline = activeSecuritySelection
+    ? pipelines.find((p) => p.id === activeSecuritySelection.pipelineId) || null
+    : null;
+  const activeSecurityBuild: Build | null = activeSecurityPipeline
+    ? (activeSecurityPipeline.lastBuild?.buildNumber === activeSecuritySelection?.buildNumber
+        ? (activeSecurityPipeline.lastBuild ?? null)
+        : (activeSecurityPipeline.history.find((b) => b.buildNumber === activeSecuritySelection?.buildNumber) ??
+           activeSecurityPipeline.lastBuild ?? null))
+    : null;
+
+  const activeDockerPipeline = activeDockerSelection
+    ? pipelines.find((p) => p.id === activeDockerSelection.pipelineId) || null
+    : null;
+  const activeDockerBuild: Build | null = activeDockerPipeline
+    ? (activeDockerPipeline.lastBuild?.buildNumber === activeDockerSelection?.buildNumber
+        ? (activeDockerPipeline.lastBuild ?? null)
+        : (activeDockerPipeline.history.find((b) => b.buildNumber === activeDockerSelection?.buildNumber) ??
+           activeDockerPipeline.lastBuild ?? null))
+    : null;
+
+  // Poll backend health check
+  const refreshBackendStatus = useCallback(async () => {
+    const health = await checkBackendHealth();
+    const isUp = !!health && health.status === 'healthy';
+    setBackendOnline(isUp);
+    return isUp;
+  }, []);
+
+  // Load data from live FastAPI backend
+  const loadBackendData = useCallback(async () => {
+    try {
+      const [backendPipes, backendMetrics] = await Promise.all([
+        fetchPipelines(),
+        fetchMetrics(),
+      ]);
+      setPipelines(backendPipes);
+      setMetrics(backendMetrics);
+      setBackendNotice('Connected to live FastAPI backend at port 8000.');
+    } catch {
+      setBackendNotice('Failed to fetch from FastAPI. Falling back to local data.');
     }
-  }, [pipelines]);
+  }, []);
+
+  // Health check on initial render
+  useEffect(() => {
+    let isMounted = true;
+    checkBackendHealth().then((health) => {
+      if (isMounted) {
+        setBackendOnline(!!health && health.status === 'healthy');
+      }
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Handle switching modes
+  const handleToggleMode = async () => {
+    const nextMode = !isDemoMode;
+    setIsDemoMode(nextMode);
+
+    if (!nextMode) {
+      // Switching to Live API Mode
+      const isUp = await refreshBackendStatus();
+      if (isUp) {
+        await loadBackendData();
+      } else {
+        setBackendNotice('FastAPI backend not detected at http://localhost:8000. Running in fallback mode.');
+      }
+    } else {
+      // Reset back to initial demo data
+      setPipelines(INITIAL_PIPELINES);
+      setMetrics(DEMO_METRICS);
+      setBackendNotice(null);
+    }
+  };
 
   // Handler to open trigger modal
   const handleOpenTrigger = (pipelineId?: string) => {
@@ -38,8 +124,25 @@ export const App: React.FC = () => {
     setIsTriggerModalOpen(true);
   };
 
-  // Live simulation execution of a pipeline in Demo Mode
-  const handleTriggerPipeline = (pipelineId: string, options: TriggerOptions) => {
+  // Build trigger handler
+  const handleTriggerPipeline = async (pipelineId: string, options: TriggerOptions) => {
+    // If connected in Live API mode, send real trigger request to FastAPI
+    if (!isDemoMode && backendOnline) {
+      try {
+        await triggerPipelineBuild(pipelineId, {
+          branch: options.branch,
+          environment: options.environment,
+          run_security_scan: options.runSecurityScan,
+          deploy_container: options.deployContainer,
+        });
+        await loadBackendData();
+        return;
+      } catch (err) {
+        console.error('Failed to trigger build on backend, falling back to simulation', err);
+      }
+    }
+
+    // Interactive Demo Mode: live in-browser multi-stage simulation
     setPipelines((prevPipelines) => {
       return prevPipelines.map((pipe) => {
         if (pipe.id !== pipelineId) return pipe;
@@ -86,7 +189,6 @@ export const App: React.FC = () => {
       });
     });
 
-    // Run stage simulation steps asynchronously
     runPipelineSimulation(pipelineId, options);
   };
 
@@ -268,26 +370,49 @@ export const App: React.FC = () => {
       {/* Top Navigation */}
       <Navbar
         isDemoMode={isDemoMode}
-        onToggleDemoMode={() => setIsDemoMode(!isDemoMode)}
+        onToggleDemoMode={handleToggleMode}
         onOpenTriggerModal={() => handleOpenTrigger()}
         buildsCount={metrics.totalBuilds}
+        apiConnected={backendOnline}
       />
 
-      {/* Demo Banner */}
-      {isDemoMode && (
+      {/* Demo / Live Status Banner */}
+      {isDemoMode ? (
         <div className="demo-banner">
           <div className="demo-banner-left">
-            <span className="demo-badge-pill">Phase 1 Demo Mode</span>
+            <span className="demo-badge-pill">Interactive Demo Mode</span>
             <div className="demo-banner-text">
-              Displaying simulated CI/CD telemetry. <span>Click "Run Pipeline" to test live multi-stage execution, real-time log generation, or simulated test failures.</span>
+              Simulating multi-stage CI/CD execution with real-time logs, security scanning, and Docker deployments.
+              <span> Click "Run Pipeline" to test live stages or simulate test failures.</span>
             </div>
           </div>
           <button 
             className="demo-mode-toggle"
-            onClick={() => setIsDemoMode(false)}
-            title="Switch connection to FastAPI"
+            onClick={handleToggleMode}
+            title="Switch connection to live FastAPI backend"
           >
-            <span>FastAPI Setup Planned for Phase 2</span>
+            <span>{backendOnline ? 'Switch to Live FastAPI' : 'FastAPI Offline - Click to Test'}</span>
+          </button>
+        </div>
+      ) : (
+        <div className="demo-banner" style={{ borderLeftColor: backendOnline ? '#10b981' : '#f59e0b' }}>
+          <div className="demo-banner-left">
+            <span 
+              className="demo-badge-pill" 
+              style={{ backgroundColor: backendOnline ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)', color: backendOnline ? '#34d399' : '#fbbf24' }}
+            >
+              {backendOnline ? 'Live API Mode Active' : 'Connecting to Backend'}
+            </span>
+            <div className="demo-banner-text">
+              {backendNotice || (backendOnline ? 'Connected to FastAPI backend on port 8000.' : 'Attempting to reach FastAPI backend on port 8000...')}
+            </div>
+          </div>
+          <button 
+            className="demo-mode-toggle"
+            onClick={handleToggleMode}
+            title="Switch back to Demo Sandbox"
+          >
+            <span>Return to Demo Sandbox</span>
           </button>
         </div>
       )}
@@ -310,9 +435,9 @@ export const App: React.FC = () => {
               key={pipeline.id}
               pipeline={pipeline}
               onTrigger={(id) => handleOpenTrigger(id)}
-              onViewLogs={(pipe, bld) => setActiveLogsModal({ pipeline: pipe, build: bld })}
-              onViewSecurity={(pipe, bld) => setActiveSecurityModal({ pipeline: pipe, build: bld })}
-              onViewDocker={(pipe, bld) => setActiveDockerModal({ pipeline: pipe, build: bld })}
+              onViewLogs={(pipe, bld) => setActiveLogsSelection({ pipelineId: pipe.id, buildNumber: bld.buildNumber })}
+              onViewSecurity={(pipe, bld) => setActiveSecuritySelection({ pipelineId: pipe.id, buildNumber: bld.buildNumber })}
+              onViewDocker={(pipe, bld) => setActiveDockerSelection({ pipelineId: pipe.id, buildNumber: bld.buildNumber })}
             />
           ))}
         </div>
@@ -328,27 +453,27 @@ export const App: React.FC = () => {
         />
       )}
 
-      {activeLogsModal && (
+      {activeLogsPipeline && activeLogsBuild && (
         <LiveLogsModal
-          pipeline={activeLogsModal.pipeline}
-          build={activeLogsModal.build}
-          onClose={() => setActiveLogsModal(null)}
+          pipeline={activeLogsPipeline}
+          build={activeLogsBuild}
+          onClose={() => setActiveLogsSelection(null)}
         />
       )}
 
-      {activeSecurityModal && (
+      {activeSecurityPipeline && activeSecurityBuild && (
         <SecurityScanModal
-          pipeline={activeSecurityModal.pipeline}
-          build={activeSecurityModal.build}
-          onClose={() => setActiveSecurityModal(null)}
+          pipeline={activeSecurityPipeline}
+          build={activeSecurityBuild}
+          onClose={() => setActiveSecuritySelection(null)}
         />
       )}
 
-      {activeDockerModal && activeDockerModal.build.deployment && (
+      {activeDockerPipeline && activeDockerBuild && activeDockerBuild.deployment && (
         <DockerStatusModal
-          pipeline={activeDockerModal.pipeline}
-          deployment={activeDockerModal.build.deployment}
-          onClose={() => setActiveDockerModal(null)}
+          pipeline={activeDockerPipeline}
+          deployment={activeDockerBuild.deployment}
+          onClose={() => setActiveDockerSelection(null)}
         />
       )}
     </div>
