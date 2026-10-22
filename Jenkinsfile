@@ -83,4 +83,4 @@ pipeline {
             echo 'FAILURE: Check the console output for the failing stage.'
         }
     }
-}
+}// Test SCM polling trigger
