@@ -98,7 +98,7 @@ pipeline {
 
                     echo "Checking frontend-to-backend connection..."
                     docker exec autopipeline-frontend wget -qO- \
-                        http://127.0.0.1/api/health
+                        http://127.0.0.1:8080/api/health
 
                     echo
                     echo "Deployment smoke tests passed."
