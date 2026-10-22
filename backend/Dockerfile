@@ -11,6 +11,12 @@ RUN python -m pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
+RUN groupadd --system app \
+    && useradd --system --gid app --home-dir /home/app app \
+    && chown -R app:app /app
+
+USER app
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
